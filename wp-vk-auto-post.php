@@ -25,15 +25,15 @@ function wp_vk_auto_post_settings_page() {
     if (!current_user_can('manage_options')) {
         return;
     }
-    
+
     if (isset($_POST['submit'])) {
         update_option('wp_vk_access_token', sanitize_text_field($_POST['wp_vk_access_token']));
         update_option('wp_vk_group_id', sanitize_text_field($_POST['wp_vk_group_id']));
-        
+
         $selected_categories = isset($_POST['wp_vk_post_categories']) ? 
             array_map('intval', (array)$_POST['wp_vk_post_categories']) : [];
         update_option('wp_vk_post_categories', $selected_categories);
-        
+
         echo '<div class="updated"><p>Настройки сохранены.</p></div>';
     }
 
@@ -87,21 +87,23 @@ function wp_vk_auto_post_settings_page() {
 
 // Функция загрузки изображения в ВК
 function wp_vk_upload_image($image_url, $group_id, $access_token) {
+    error_log('Uploading image to VK for URL: ' . $image_url);
+
     $api_url = "https://api.vk.com/method/photos.getWallUploadServer?group_id=" . str_replace('-', '', $group_id) . "&access_token=$access_token&v=5.131";
     $response = wp_remote_get($api_url);
-    
+
     if (is_wp_error($response)) {
         error_log('VK API Error (getWallUploadServer): ' . $response->get_error_message());
         return false;
     }
-    
+
     $response_data = json_decode(wp_remote_retrieve_body($response), true);
-    
+
     if (isset($response_data['error'])) {
         error_log('VK API Error: ' . $response_data['error']['error_msg']);
         return false;
     }
-    
+
     $temp_file = download_url($image_url);
     if (is_wp_error($temp_file)) {
         error_log('Ошибка загрузки изображения: ' . $temp_file->get_error_message());
@@ -125,22 +127,22 @@ function wp_vk_upload_image($image_url, $group_id, $access_token) {
     }
 
     $upload_data = json_decode(wp_remote_retrieve_body($upload_response), true);
-    
+
     $save_url = "https://api.vk.com/method/photos.saveWallPhoto?group_id=" . str_replace('-', '', $group_id) 
         . "&photo={$upload_data['photo']}"
         . "&server={$upload_data['server']}"
         . "&hash={$upload_data['hash']}"
         . "&access_token=$access_token&v=5.131";
-    
+
     $save_response = wp_remote_get($save_url);
-    
+
     if (is_wp_error($save_response)) {
         error_log('VK Save Error: ' . $save_response->get_error_message());
         return false;
     }
 
     $save_data = json_decode(wp_remote_retrieve_body($save_response), true);
-    
+
     if (isset($save_data['error'])) {
         error_log('VK API Error (saveWallPhoto): ' . $save_data['error']['error_msg']);
         return false;
@@ -152,7 +154,6 @@ function wp_vk_upload_image($image_url, $group_id, $access_token) {
 // Функция форматирования тегов для VK
 function wp_vk_format_tags($tags) {
     if (!$tags) return '';
-
     $formatted_tags = array_map(function($tag) {
         $tag_name = str_replace(' ', '_', mb_strtolower($tag->name, 'UTF-8'));
         $tag_name = preg_replace('/[^a-zа-я0-9_]/u', '', $tag_name);
@@ -167,11 +168,17 @@ function wp_vk_format_tags($tags) {
 }
 
 // Функция публикации поста в VK
-function wp_vk_auto_post_publish($post_id) {
-    if (wp_is_post_revision($post_id) || get_post_status($post_id) !== 'publish') {
+function wp_vk_auto_post_publish($new_status, $old_status, $post) {
+    // Логирование для отладки
+    error_log('Transition post status: ' . $post->ID . ' - New status: ' . $new_status . ', Old status: ' . $old_status);
+
+    // Проверяем, что это действительно публикация поста (статус стал "publish")
+    if ($new_status !== 'publish' || $old_status === 'publish' || $post->post_type !== 'post') {
+        error_log('Skipping post: Post is not being published or is not a standard post.');
         return;
     }
 
+    // Получаем настройки плагина
     $access_token = get_option('wp_vk_access_token');
     $group_id = '-' . get_option('wp_vk_group_id');
     $selected_categories = get_option('wp_vk_post_categories', []);
@@ -181,16 +188,16 @@ function wp_vk_auto_post_publish($post_id) {
         return;
     }
 
-    $post = get_post($post_id);
-    $post_categories = wp_get_post_categories($post_id);
-
+    // Проверяем категории поста
+    $post_categories = wp_get_post_categories($post->ID);
     if (!empty($selected_categories) && !array_intersect($post_categories, $selected_categories)) {
+        error_log('Skipping post: Post categories do not match selected categories.');
         return;
     }
 
     // Обработка контента
     $raw_content = $post->post_content;
-    
+
     // Разделение по тегу <!--more-->
     if (strpos($raw_content, '<!--more-->') !== false) {
         $content_parts = explode('<!--more-->', $raw_content, 2);
@@ -199,7 +206,7 @@ function wp_vk_auto_post_publish($post_id) {
 
     // Применение фильтров WordPress
     $processed_content = apply_filters('the_content', $raw_content);
-    
+
     // Форматирование контента
     $content = str_replace(['<br>', '<br/>', '<br />', '</p>'], "\n", $processed_content);
     $content = preg_replace('/<p[^>]*>/', '', $content);
@@ -211,10 +218,10 @@ function wp_vk_auto_post_publish($post_id) {
     $content = preg_replace('/\n{3,}/', "\n\n", $content);
 
     // Формирование сообщения
-    $title = get_the_title($post_id);
-    $shortlink = wp_get_shortlink($post_id);
-    $tags_text = wp_vk_format_tags(get_the_tags($post_id));
-    
+    $title = get_the_title($post->ID);
+    $shortlink = wp_get_shortlink($post->ID);
+    $tags_text = wp_vk_format_tags(get_the_tags($post->ID));
+
     $message = "{$title}\n\n{$content}\n\n{$shortlink}\n{$tags_text}";
     $message = mb_substr($message, 0, 9000, 'UTF-8');
 
@@ -227,9 +234,8 @@ function wp_vk_auto_post_publish($post_id) {
     ];
 
     // Добавление изображения
-    $image_url = get_the_post_thumbnail_url($post_id, 'full');
+    $image_url = get_the_post_thumbnail_url($post->ID, 'full');
     $attachments = [];
-
     if ($image_url) {
         $attachment = wp_vk_upload_image($image_url, $group_id, $access_token);
         if ($attachment) {
@@ -242,15 +248,19 @@ function wp_vk_auto_post_publish($post_id) {
     }
 
     $response = wp_remote_post('https://api.vk.com/method/wall.post', ['body' => $params]);
-    
+
     if (is_wp_error($response)) {
         error_log('VK Post Error: ' . $response->get_error_message());
         return;
     }
-    
+
     $response_data = json_decode(wp_remote_retrieve_body($response), true);
     if (isset($response_data['error'])) {
         error_log('VK API Error (wall.post): ' . $response_data['error']['error_msg']);
+    } else {
+        error_log('Post successfully published to VK for post ID: ' . $post->ID);
     }
 }
-add_action('publish_post', 'wp_vk_auto_post_publish');
+
+// Используем хук transition_post_status вместо publish_post
+add_action('transition_post_status', 'wp_vk_auto_post_publish', 10, 3);
